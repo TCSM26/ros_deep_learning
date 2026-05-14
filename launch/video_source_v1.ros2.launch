@@ -1,0 +1,51 @@
+<launch>
+  <arg name="input" default="csi://0"/>
+
+  <!-- Capture size -->
+  <arg name="input_width" default="1280"/>
+  <arg name="input_height" default="720"/>
+  <arg name="input_framerate" default="60.0"/>
+
+  <!-- Published size -->
+  <arg name="output_width" default="420"/>
+  <arg name="output_height" default="240"/>
+
+  <arg name="input_codec" default="unknown"/>
+  <arg name="input_loop" default="0"/>
+  <arg name="input_latency" default="2000"/>
+
+  <!-- Use GPU-side flip if your camera is mounted upside-down -->
+  <arg name="input_flip" default="rotate-180"/>
+
+  <!-- CSI sensor mode (nvarguscamerasrc sensor-mode=N).
+       -1 = auto. For IMX219: 4 = 1280x720@60fps, 5 = 1280x720@120fps. -->
+  <arg name="sensor_mode" default="4"/>
+
+  <!-- Stream robustness -->
+  <arg name="pool_size" default="3"/>
+  <arg name="reconnect_delay_ms" default="2000"/>
+  <arg name="max_consecutive_failures" default="5"/>
+
+  <node
+    pkg="ros_deep_learning"
+    exec="optimized_camera_node"
+    name="optimized_camera_node"
+    output="screen"
+    namespace="camera">
+
+    <param name="resource" value="$(var input)"/>
+    <param name="width" value="$(var input_width)"/>
+    <param name="height" value="$(var input_height)"/>
+    <param name="framerate" value="$(var input_framerate)"/>
+    <param name="output_width" value="$(var output_width)"/>
+    <param name="output_height" value="$(var output_height)"/>
+    <param name="codec" value="$(var input_codec)"/>
+    <param name="loop" value="$(var input_loop)"/>
+    <param name="latency" value="$(var input_latency)"/>
+    <param name="flip" value="$(var input_flip)"/>
+    <param name="sensor_mode" value="$(var sensor_mode)"/>
+    <param name="pool_size" value="$(var pool_size)"/>
+    <param name="reconnect_delay_ms" value="$(var reconnect_delay_ms)"/>
+    <param name="max_consecutive_failures" value="$(var max_consecutive_failures)"/>
+  </node>
+</launch>
