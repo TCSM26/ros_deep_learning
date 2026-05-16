@@ -17,8 +17,7 @@
   <!-- Use GPU-side flip if your camera is mounted upside-down -->
   <arg name="input_flip" default="rotate-180"/>
 
-  <!-- CSI sensor mode (nvarguscamerasrc sensor-mode=N).
-       -1 = auto. For IMX219: 4 = 1280x720@60fps, 5 = 1280x720@120fps. -->
+  <!-- CSI sensor mode. -1 = auto. IMX219: 4 = 1280x720@60fps. -->
   <arg name="sensor_mode" default="4"/>
 
   <!-- Stream robustness -->
@@ -26,13 +25,16 @@
   <arg name="reconnect_delay_ms" default="2000"/>
   <arg name="max_consecutive_failures" default="5"/>
 
-  <!-- Cap publish rate (Hz). 0 = unlimited. Frames are dropped before resize/convert. -->
-  <arg name="publish_rate" default="15.0"/>
+  <!-- Calibration. The C++ node reads a YAML produced from the .npz by
+       scripts/calibration_npz_to_yaml.py. alpha 0 crops black borders;
+       1 keeps full FoV. -->
+  <arg name="calibration_file" default="$(find-pkg-share ros_deep_learning)/data/calibration_data.yaml"/>
+  <arg name="undistort_alpha" default="0.0"/>
 
   <node
     pkg="ros_deep_learning"
-    exec="optimized_camera_node"
-    name="optimized_camera_node"
+    exec="optimized_camera_node_undistort"
+    name="optimized_camera_node_undistort"
     output="screen"
     namespace="camera">
 
@@ -50,6 +52,7 @@
     <param name="pool_size" value="$(var pool_size)"/>
     <param name="reconnect_delay_ms" value="$(var reconnect_delay_ms)"/>
     <param name="max_consecutive_failures" value="$(var max_consecutive_failures)"/>
-    <param name="publish_rate" value="$(var publish_rate)"/>
+    <param name="calibration_file" value="$(var calibration_file)"/>
+    <param name="undistort_alpha" value="$(var undistort_alpha)"/>
   </node>
 </launch>

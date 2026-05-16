@@ -105,6 +105,10 @@ target_link_libraries(optimized_camera_node ${catkin_LIBRARIES} jetson-inference
 add_executable(optimized_camera_node2 src/optimized_camera_node2.cpp ${common_src})
 target_link_libraries(optimized_camera_node2 ${catkin_LIBRARIES} jetson-inference)
 
+# optimized camera node with on-board undistortion
+add_executable(optimized_camera_node_undistort src/optimized_camera_node_undistort.cpp ${common_src})
+target_link_libraries(optimized_camera_node_undistort ${catkin_LIBRARIES} jetson-inference)
+
 
 # ROS2: Dependencias
 ament_target_dependencies(optimized_camera_node
@@ -117,6 +121,17 @@ ament_target_dependencies(optimized_camera_node
   OpenCV
 )
 install(TARGETS optimized_camera_node DESTINATION lib/${PROJECT_NAME})
+
+ament_target_dependencies(optimized_camera_node_undistort
+  rclcpp
+  std_msgs
+  sensor_msgs
+  image_transport
+  vision_msgs
+  cv_bridge
+  OpenCV
+)
+install(TARGETS optimized_camera_node_undistort DESTINATION lib/${PROJECT_NAME})
 
 # ROS2: Dependencias
 ament_target_dependencies(optimized_camera_node2
@@ -155,6 +170,7 @@ else()
   install(TARGETS video_output DESTINATION lib/${PROJECT_NAME})
 
   install(DIRECTORY launch DESTINATION share/${PROJECT_NAME}/)
+  install(DIRECTORY data DESTINATION share/${PROJECT_NAME}/ OPTIONAL)
 
   ament_package()
 endif()
