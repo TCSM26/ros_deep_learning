@@ -42,6 +42,11 @@ int max_consecutive_failures = 5;
 int output_width = 0;
 int output_height = 0;
 
+// Publish rate cap. 0 (or negative) = unlimited (publish every captured frame).
+// When > 0, frames captured faster than this rate are dropped before resize/convert/undistort/publish.
+double publish_rate = 0.0;
+std::chrono::steady_clock::time_point last_publish_time;
+
 // --- Undistortion state ---
 std::string calibration_file;       // YAML produced by scripts/calibration_npz_to_yaml.py
 double undistort_alpha = 0.0;       // 0 = crop, 1 = keep full FoV
@@ -170,6 +175,17 @@ bool acquireFrame()
 
     if (!stream->Capture(&nextFrame, 100)) {
         return false;
+    }
+
+    // Rate cap: drop the frame *before* the expensive convert/resize/undistort/publish path.
+    // We still call Capture() above so the GStreamer pipeline doesn't back up.
+    if (publish_rate > 0.0) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto min_interval = std::chrono::duration<double>(1.0 / publish_rate);
+        if (now - last_publish_time < min_interval) {
+            return true;   // frame consumed but intentionally skipped
+        }
+        last_publish_time = now;
     }
 
     sensor_msgs::msg::Image& msg = image_pool[current_msg_index];
@@ -310,6 +326,7 @@ int main(int argc, char **argv)
     ROS_DECLARE_PARAMETER("output_height", output_height);
     ROS_DECLARE_PARAMETER("calibration_file", calibration_file);
     ROS_DECLARE_PARAMETER("undistort_alpha", undistort_alpha);
+    ROS_DECLARE_PARAMETER("publish_rate", publish_rate);     // Hz cap, 0 = unlimited
 
     ROS_GET_PARAMETER("resource", resource_str);
     ROS_GET_PARAMETER("codec", codec_str);
@@ -327,6 +344,7 @@ int main(int argc, char **argv)
     ROS_GET_PARAMETER("output_height", output_height);
     ROS_GET_PARAMETER("calibration_file", calibration_file);
     ROS_GET_PARAMETER("undistort_alpha", undistort_alpha);
+    ROS_GET_PARAMETER("publish_rate", publish_rate);
 
     if (resource_str.empty()) {
         ROS_ERROR("resource param wasn't set - please set the node's resource parameter");
@@ -361,6 +379,11 @@ int main(int argc, char **argv)
     else
         ROS_INFO("Published (output) dimensions: same as capture");
 
+    if (publish_rate > 0.0)
+        ROS_INFO("Publish rate cap: %.1f Hz", publish_rate);
+    else
+        ROS_INFO("Publish rate cap: unlimited");
+
     image_cvt = new imageConverter();
     if (!image_cvt) {
         ROS_ERROR("Failed to create imageConverter");
@@ -371,9 +394,9 @@ int main(int argc, char **argv)
     qos_settings.best_effort();
 
     image_transport_ = std::make_shared<image_transport::ImageTransport>(node);
-    image_pub = image_transport_->advertise("/image_raw", 1);
+    image_pub = image_transport_->advertise("image_raw", 1);
     camera_info_pub = node->create_publisher<sensor_msgs::msg::CameraInfo>(
-        "/image_raw/camera_info", qos_settings);
+        "image_raw/camera_info", qos_settings);
 
     image_pool.resize(pool_size);
     for (auto& msg : image_pool) {

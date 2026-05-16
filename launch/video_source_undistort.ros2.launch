@@ -1,4 +1,5 @@
 <launch>
+  <arg name="namespace" default=""/>
   <arg name="input" default="csi://0"/>
 
   <!-- Capture size -->
@@ -25,6 +26,9 @@
   <arg name="reconnect_delay_ms" default="2000"/>
   <arg name="max_consecutive_failures" default="5"/>
 
+  <!-- Cap publish rate (Hz). 0 = unlimited. Frames are dropped before resize/convert/undistort. -->
+  <arg name="publish_rate" default="15.0"/>
+
   <!-- Calibration. The C++ node reads a YAML produced from the .npz by
        scripts/calibration_npz_to_yaml.py. alpha 0 crops black borders;
        1 keeps full FoV. -->
@@ -36,7 +40,7 @@
     exec="optimized_camera_node_undistort"
     name="optimized_camera_node_undistort"
     output="screen"
-    namespace="camera">
+    namespace="$(var namespace)">
 
     <param name="resource" value="$(var input)"/>
     <param name="width" value="$(var input_width)"/>
@@ -54,5 +58,6 @@
     <param name="max_consecutive_failures" value="$(var max_consecutive_failures)"/>
     <param name="calibration_file" value="$(var calibration_file)"/>
     <param name="undistort_alpha" value="$(var undistort_alpha)"/>
+    <param name="publish_rate" value="$(var publish_rate)"/>
   </node>
 </launch>
