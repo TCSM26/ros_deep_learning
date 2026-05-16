@@ -47,6 +47,92 @@ int output_height = 0;
 double publish_rate = 0.0;
 std::chrono::steady_clock::time_point last_publish_time;
 
+// Camera calibration state. The raw image is still distorted, so CameraInfo
+// publishes the original distortion coefficients with K scaled to output size.
+std::string calibration_file;       // YAML produced by scripts/calibration_npz_to_yaml.py
+cv::Mat camera_matrix;              // calibration K (at calibration resolution)
+cv::Mat dist_coeffs;                // distortion coefficients
+int calib_width = 0;                // resolution K was estimated at
+int calib_height = 0;
+bool calibration_loaded = false;
+sensor_msgs::msg::CameraInfo cached_camera_info;
+
+// Reads K, dist, image_width, image_height from a cv::FileStorage YAML.
+bool loadCalibration(const std::string& path)
+{
+    cv::FileStorage fs(path, cv::FileStorage::READ);
+    if (!fs.isOpened()) {
+        ROS_ERROR("Could not open calibration file: %s", path.c_str());
+        return false;
+    }
+
+    fs["K"]            >> camera_matrix;
+    fs["dist"]         >> dist_coeffs;
+    fs["image_width"]  >> calib_width;
+    fs["image_height"] >> calib_height;
+    fs.release();
+
+    if (camera_matrix.empty() || dist_coeffs.empty() ||
+        calib_width <= 0 || calib_height <= 0)
+    {
+        ROS_ERROR("Calibration file is missing K / dist / image_size: %s", path.c_str());
+        return false;
+    }
+
+    camera_matrix.convertTo(camera_matrix, CV_64F);
+    dist_coeffs.convertTo(dist_coeffs, CV_64F);
+    dist_coeffs = dist_coeffs.reshape(1, 1);
+    calibration_loaded = true;
+
+    ROS_INFO("Loaded calibration from %s (calibrated at %dx%d)",
+             path.c_str(), calib_width, calib_height);
+    return true;
+}
+
+// Build CameraInfo once for the distorted/raw image being published.
+void buildCameraInfo(int published_width, int published_height)
+{
+    if (!calibration_loaded) {
+        return;
+    }
+
+    const double sx = static_cast<double>(published_width)  / calib_width;
+    const double sy = static_cast<double>(published_height) / calib_height;
+
+    cv::Mat K_scaled = camera_matrix.clone();
+    K_scaled.at<double>(0, 0) *= sx;  // fx
+    K_scaled.at<double>(1, 1) *= sy;  // fy
+    K_scaled.at<double>(0, 2) *= sx;  // cx
+    K_scaled.at<double>(1, 2) *= sy;  // cy
+
+    cached_camera_info.width = published_width;
+    cached_camera_info.height = published_height;
+    cached_camera_info.distortion_model = "plumb_bob";
+    cached_camera_info.d.resize(static_cast<size_t>(dist_coeffs.total()));
+    const double* dist_data = dist_coeffs.ptr<double>(0);
+    for (size_t i = 0; i < cached_camera_info.d.size(); ++i) {
+        cached_camera_info.d[i] = dist_data[i];
+    }
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            cached_camera_info.k[r * 3 + c] = K_scaled.at<double>(r, c);
+        }
+    }
+
+    cached_camera_info.r = {1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, 0.0, 1.0};
+    cached_camera_info.p = {
+        K_scaled.at<double>(0, 0), 0.0,
+            K_scaled.at<double>(0, 2), 0.0,
+        0.0, K_scaled.at<double>(1, 1),
+            K_scaled.at<double>(1, 2), 0.0,
+        0.0, 0.0, 1.0, 0.0
+    };
+
+    ROS_INFO("CameraInfo cached for published size %dx%d",
+             published_width, published_height);
+}
+
 // Initialize or reinitialize the video stream
 bool initializeStream()
 {
@@ -137,10 +223,8 @@ bool acquireFrame()
 
     image_pub.publish(std::make_shared<sensor_msgs::msg::Image>(msg));
 
-    sensor_msgs::msg::CameraInfo info_msg;
+    sensor_msgs::msg::CameraInfo info_msg = cached_camera_info;
     info_msg.header = msg.header;
-    info_msg.width = msg.width;
-    info_msg.height = msg.height;
     camera_info_pub->publish(info_msg);
 
     return true;
@@ -230,6 +314,7 @@ int main(int argc, char **argv)
     ROS_DECLARE_PARAMETER("output_width", output_width);     // NEW
     ROS_DECLARE_PARAMETER("output_height", output_height);   // NEW
     ROS_DECLARE_PARAMETER("publish_rate", publish_rate);     // Hz cap, 0 = unlimited
+    ROS_DECLARE_PARAMETER("calibration_file", calibration_file);
 
     ROS_GET_PARAMETER("resource", resource_str);
     ROS_GET_PARAMETER("codec", codec_str);
@@ -246,9 +331,24 @@ int main(int argc, char **argv)
     ROS_GET_PARAMETER("output_width", output_width);         // NEW
     ROS_GET_PARAMETER("output_height", output_height);       // NEW
     ROS_GET_PARAMETER("publish_rate", publish_rate);
+    ROS_GET_PARAMETER("calibration_file", calibration_file);
 
     if (resource_str.empty()) {
         ROS_ERROR("resource param wasn't set - please set the node's resource parameter");
+        return 0;
+    }
+
+    if (calibration_file.empty()) {
+        ROS_ERROR("calibration_file param wasn't set - convert the .npz with scripts/calibration_npz_to_yaml.py first");
+        return 0;
+    }
+
+    if (!loadCalibration(calibration_file)) {
+        return 0;
+    }
+
+    if (output_width <= 0 || output_height <= 0) {
+        ROS_ERROR("output_width and output_height must be set for cached CameraInfo");
         return 0;
     }
 
@@ -263,6 +363,8 @@ int main(int argc, char **argv)
     video_options.latency = latency;
     video_options.zeroCopy = true;
     video_options.sensorMode = sensor_mode;
+
+    buildCameraInfo(output_width, output_height);
 
     ROS_INFO("Capture dimensions: %dx%d at %.1f FPS",
              video_width, video_height, video_options.frameRate);

@@ -29,6 +29,10 @@
   <!-- Cap publish rate (Hz). 0 = unlimited. Frames are dropped before resize/convert. -->
   <arg name="publish_rate" default="15.0"/>
 
+  <!-- Calibration. The C++ node reads a YAML produced from the .npz by
+       scripts/calibration_npz_to_yaml.py. -->
+  <arg name="calibration_file" default="$(find-pkg-share ros_deep_learning)/data/calibration_data.yaml"/>
+
   <node
     pkg="ros_deep_learning"
     exec="optimized_camera_node"
@@ -51,5 +55,6 @@
     <param name="reconnect_delay_ms" value="$(var reconnect_delay_ms)"/>
     <param name="max_consecutive_failures" value="$(var max_consecutive_failures)"/>
     <param name="publish_rate" value="$(var publish_rate)"/>
+    <param name="calibration_file" value="$(var calibration_file)"/>
   </node>
 </launch>

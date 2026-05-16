@@ -55,10 +55,10 @@ cv::Mat dist_coeffs;                // distortion coefficients
 int calib_width = 0;                // resolution K was estimated at
 int calib_height = 0;
 
-cv::Mat undistort_map1;             // CV_16SC2 remap LUTs (built on first frame)
+cv::Mat undistort_map1;             // CV_16SC2 remap LUTs
 cv::Mat undistort_map2;
 cv::Mat new_camera_matrix;          // K for the published, undistorted image
-bool maps_initialized = false;
+sensor_msgs::msg::CameraInfo cached_camera_info;
 
 // Reads K, dist, image_width, image_height from a cv::FileStorage YAML.
 bool loadCalibration(const std::string& path)
@@ -81,6 +81,10 @@ bool loadCalibration(const std::string& path)
         ROS_ERROR("Calibration file is missing K / dist / image_size: %s", path.c_str());
         return false;
     }
+
+    camera_matrix.convertTo(camera_matrix, CV_64F);
+    dist_coeffs.convertTo(dist_coeffs, CV_64F);
+    dist_coeffs = dist_coeffs.reshape(1, 1);
 
     ROS_INFO("Loaded calibration from %s (calibrated at %dx%d)",
              path.c_str(), calib_width, calib_height);
@@ -110,31 +114,28 @@ void buildUndistortMaps(int published_width, int published_height)
         new_camera_matrix, size, CV_16SC2,
         undistort_map1, undistort_map2);
 
-    maps_initialized = true;
-    ROS_INFO("Undistort maps built for published size %dx%d (alpha=%.2f)",
-             published_width, published_height, undistort_alpha);
-}
-
-// Fill CameraInfo from the new (post-undistort) intrinsics.
-void fillCameraInfo(sensor_msgs::msg::CameraInfo& info)
-{
-    info.distortion_model = "plumb_bob";
-    info.d.assign(5, 0.0);  // image is already undistorted
+    cached_camera_info.width = published_width;
+    cached_camera_info.height = published_height;
+    cached_camera_info.distortion_model = "plumb_bob";
+    cached_camera_info.d.assign(5, 0.0);  // image is already undistorted
 
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c) {
-            info.k[r * 3 + c] = new_camera_matrix.at<double>(r, c);
+            cached_camera_info.k[r * 3 + c] = new_camera_matrix.at<double>(r, c);
         }
     }
-    // R = identity, P = [K | 0]
-    info.r = {1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, 0.0, 1.0};
-    info.p = {
+
+    cached_camera_info.r = {1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, 0.0, 1.0};
+    cached_camera_info.p = {
         new_camera_matrix.at<double>(0, 0), 0.0,
             new_camera_matrix.at<double>(0, 2), 0.0,
         0.0, new_camera_matrix.at<double>(1, 1),
             new_camera_matrix.at<double>(1, 2), 0.0,
         0.0, 0.0, 1.0, 0.0
     };
+
+    ROS_INFO("Undistort maps and CameraInfo cached for published size %dx%d (alpha=%.2f)",
+             published_width, published_height, undistort_alpha);
 }
 
 // Initialize or reinitialize the video stream
@@ -224,21 +225,14 @@ bool acquireFrame()
         frame = resized;
     }
 
-    if (!maps_initialized) {
-        buildUndistortMaps(frame.cols, frame.rows);
-    }
-
     cv::Mat undistorted;
     cv::remap(frame, undistorted, undistort_map1, undistort_map2, cv::INTER_LINEAR);
 
     msg = *cv_bridge::CvImage(msg.header, "bgr8", undistorted).toImageMsg();
     image_pub.publish(std::make_shared<sensor_msgs::msg::Image>(msg));
 
-    sensor_msgs::msg::CameraInfo info_msg;
+    sensor_msgs::msg::CameraInfo info_msg = cached_camera_info;
     info_msg.header = msg.header;
-    info_msg.width = msg.width;
-    info_msg.height = msg.height;
-    fillCameraInfo(info_msg);
     camera_info_pub->publish(info_msg);
 
     return true;
@@ -360,6 +354,11 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    if (output_width <= 0 || output_height <= 0) {
+        ROS_ERROR("output_width and output_height must be set for cached undistort maps and CameraInfo");
+        return 0;
+    }
+
     if (!codec_str.empty())
         video_options.codec = videoOptions::CodecFromStr(codec_str.c_str());
 
@@ -371,6 +370,8 @@ int main(int argc, char **argv)
     video_options.latency = latency;
     video_options.zeroCopy = true;
     video_options.sensorMode = sensor_mode;
+
+    buildUndistortMaps(output_width, output_height);
 
     ROS_INFO("Capture dimensions: %dx%d at %.1f FPS",
              video_width, video_height, video_options.frameRate);
