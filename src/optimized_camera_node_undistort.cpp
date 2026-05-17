@@ -49,6 +49,7 @@ std::chrono::steady_clock::time_point last_publish_time;
 
 // --- Undistortion state ---
 std::string calibration_file;       // YAML produced by scripts/calibration_npz_to_yaml.py
+std::string calibration_model = "plumb_bob";
 double undistort_alpha = 0.0;       // 0 = crop, 1 = keep full FoV
 cv::Mat camera_matrix;              // calibration K (at calibration resolution)
 cv::Mat dist_coeffs;                // distortion coefficients
@@ -73,6 +74,7 @@ bool loadCalibration(const std::string& path)
     fs["dist"]         >> dist_coeffs;
     fs["image_width"]  >> calib_width;
     fs["image_height"] >> calib_height;
+    fs["model"]        >> calibration_model;
     fs.release();
 
     if (camera_matrix.empty() || dist_coeffs.empty() ||
@@ -85,9 +87,12 @@ bool loadCalibration(const std::string& path)
     camera_matrix.convertTo(camera_matrix, CV_64F);
     dist_coeffs.convertTo(dist_coeffs, CV_64F);
     dist_coeffs = dist_coeffs.reshape(1, 1);
+    if (calibration_model.empty()) {
+        calibration_model = "plumb_bob";
+    }
 
-    ROS_INFO("Loaded calibration from %s (calibrated at %dx%d)",
-             path.c_str(), calib_width, calib_height);
+    ROS_INFO("Loaded %s calibration from %s (calibrated at %dx%d)",
+             calibration_model.c_str(), path.c_str(), calib_width, calib_height);
     return true;
 }
 
@@ -106,13 +111,24 @@ void buildUndistortMaps(int published_width, int published_height)
     K_scaled.at<double>(1, 2) *= sy;  // cy
 
     const cv::Size size(published_width, published_height);
-    new_camera_matrix = cv::getOptimalNewCameraMatrix(
-        K_scaled, dist_coeffs, size, undistort_alpha, size);
+    if (calibration_model == "fisheye" || calibration_model == "equidistant") {
+        cv::fisheye::estimateNewCameraMatrixForUndistortRectify(
+            K_scaled, dist_coeffs, size, cv::Matx33d::eye(),
+            new_camera_matrix, undistort_alpha, size);
 
-    cv::initUndistortRectifyMap(
-        K_scaled, dist_coeffs, cv::Mat(),
-        new_camera_matrix, size, CV_16SC2,
-        undistort_map1, undistort_map2);
+        cv::fisheye::initUndistortRectifyMap(
+            K_scaled, dist_coeffs, cv::Matx33d::eye(),
+            new_camera_matrix, size, CV_16SC2,
+            undistort_map1, undistort_map2);
+    } else {
+        new_camera_matrix = cv::getOptimalNewCameraMatrix(
+            K_scaled, dist_coeffs, size, undistort_alpha, size);
+
+        cv::initUndistortRectifyMap(
+            K_scaled, dist_coeffs, cv::Mat(),
+            new_camera_matrix, size, CV_16SC2,
+            undistort_map1, undistort_map2);
+    }
 
     cached_camera_info.width = published_width;
     cached_camera_info.height = published_height;

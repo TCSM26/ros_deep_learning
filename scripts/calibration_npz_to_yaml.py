@@ -25,6 +25,7 @@ def main():
     K = np.asarray(data['K'], dtype=np.float64)
     dist = np.asarray(data['dist'], dtype=np.float64).reshape(-1)
     image_size = np.asarray(data['image_size'], dtype=np.int32).reshape(-1)
+    model = str(data['model']) if 'model' in data.files else 'plumb_bob'
 
     args.output_yaml.parent.mkdir(parents=True, exist_ok=True)
     fs = cv2.FileStorage(str(args.output_yaml), cv2.FILE_STORAGE_WRITE)
@@ -32,12 +33,14 @@ def main():
     fs.write('dist', dist)
     fs.write('image_width', int(image_size[0]))
     fs.write('image_height', int(image_size[1]))
+    fs.write('model', model)
     fs.release()
 
     print(f'Wrote {args.output_yaml}')
     print(f'  K = {K.tolist()}')
     print(f'  dist = {dist.tolist()}')
     print(f'  calib size = {int(image_size[0])}x{int(image_size[1])}')
+    print(f'  model = {model}')
 
 
 if __name__ == '__main__':

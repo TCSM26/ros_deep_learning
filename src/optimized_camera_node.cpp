@@ -50,6 +50,7 @@ std::chrono::steady_clock::time_point last_publish_time;
 // Camera calibration state. The raw image is still distorted, so CameraInfo
 // publishes the original distortion coefficients with K scaled to output size.
 std::string calibration_file;       // YAML produced by scripts/calibration_npz_to_yaml.py
+std::string calibration_model = "plumb_bob";
 cv::Mat camera_matrix;              // calibration K (at calibration resolution)
 cv::Mat dist_coeffs;                // distortion coefficients
 int calib_width = 0;                // resolution K was estimated at
@@ -70,6 +71,7 @@ bool loadCalibration(const std::string& path)
     fs["dist"]         >> dist_coeffs;
     fs["image_width"]  >> calib_width;
     fs["image_height"] >> calib_height;
+    fs["model"]        >> calibration_model;
     fs.release();
 
     if (camera_matrix.empty() || dist_coeffs.empty() ||
@@ -82,10 +84,13 @@ bool loadCalibration(const std::string& path)
     camera_matrix.convertTo(camera_matrix, CV_64F);
     dist_coeffs.convertTo(dist_coeffs, CV_64F);
     dist_coeffs = dist_coeffs.reshape(1, 1);
+    if (calibration_model.empty()) {
+        calibration_model = "plumb_bob";
+    }
     calibration_loaded = true;
 
-    ROS_INFO("Loaded calibration from %s (calibrated at %dx%d)",
-             path.c_str(), calib_width, calib_height);
+    ROS_INFO("Loaded %s calibration from %s (calibrated at %dx%d)",
+             calibration_model.c_str(), path.c_str(), calib_width, calib_height);
     return true;
 }
 
@@ -107,7 +112,8 @@ void buildCameraInfo(int published_width, int published_height)
 
     cached_camera_info.width = published_width;
     cached_camera_info.height = published_height;
-    cached_camera_info.distortion_model = "plumb_bob";
+    cached_camera_info.distortion_model =
+        (calibration_model == "fisheye") ? "equidistant" : calibration_model;
     cached_camera_info.d.resize(static_cast<size_t>(dist_coeffs.total()));
     const double* dist_data = dist_coeffs.ptr<double>(0);
     for (size_t i = 0; i < cached_camera_info.d.size(); ++i) {

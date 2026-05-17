@@ -14,3 +14,4 @@ dist: !!opencv-matrix
        -1.0637464935031088e-01, 6.4962158276659659e-02 ]
 image_width: 420
 image_height: 240
+model: fisheye
