@@ -56,10 +56,16 @@ else()
   find_package(cv_bridge REQUIRED)
   find_package(OpenCV REQUIRED)
 
+  # ZBar: QR payload decoder for optimized_camera_node_undistort_qr (this OpenCV
+  # build lacks the QUIRC decoder). Install with: sudo apt install libzbar-dev
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(ZBAR REQUIRED zbar)
+
   set(CMAKE_CXX_STANDARD 14)
   include_directories(
     ${CUDA_INCLUDE_DIRS}
     ${vision_msgs_INCLUDE_DIRS}
+    ${ZBAR_INCLUDE_DIRS}
   )
   add_definitions(-DROS2 -DROS_DISTRO=${ROS_DISTRO})
 endif()
@@ -112,7 +118,7 @@ target_link_libraries(optimized_camera_node_undistort ${catkin_LIBRARIES} jetson
 
 # optimized camera node with on-board undistortion + local QR detection/pose
 add_executable(optimized_camera_node_undistort_qr src/optimized_camera_node_undistort_qr.cpp ${common_src})
-target_link_libraries(optimized_camera_node_undistort_qr ${catkin_LIBRARIES} jetson-inference)
+target_link_libraries(optimized_camera_node_undistort_qr ${catkin_LIBRARIES} jetson-inference ${ZBAR_LIBRARIES})
 
 
 # ROS2: Dependencias

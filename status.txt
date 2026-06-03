@@ -56,3 +56,49 @@ Build / run (on the Jetson)
 Note: not build-verified on this dev box (jetson-utils/jetson-inference not
 installed here). The added OpenCV/solvePnP logic was syntax-checked against the
 installed OpenCV 4 headers; ROS message/API usage verified against humble headers.
+
+
+UPDATE 2 — ZBar decoder, decode enhancement, undistorted corner overlay
+-----------------------------------------------------------------------
+Reasoning
+  * Decoding: the Jetson's OpenCV is built WITHOUT the QUIRC backend
+    ("Library QUIRC is not linked. No decoding is performed."), so
+    cv::QRCodeDetector can DETECT the quad but never DECODE the payload. Switched
+    payload decoding to ZBar (independent decoder). OpenCV still does corner
+    detection (geometric, no quirc needed) -> pose still works even when a code
+    can't be decoded.
+  * Overlay: corners come from the full-size RAW (distorted) frame but the
+    published image is downsized AND undistorted, so a plain linear scale lands
+    them off (worse at the edges). Now mapped through the same undistortion as
+    the published image so the overlay lines up everywhere.
+
+Code changes (optimized_camera_node_undistort_qr.cpp)
+  * Detection now uses detectMulti()/detect() (corners only), not
+    detectAndDecode* -> no quirc dependency, no warning spam.
+  * New zbarDecode(gray): scans with a QR-only-configured zbar::ImageScanner,
+    returns first QR symbol's payload. Whole-frame decode runs once per frame;
+    payload assigned to the published detection.
+  * decodeQrRoi(): when whole-frame decode is empty, crop the QR region, upscale
+    (qr_decode_upscale), CLAHE (qr_decode_use_clahe), unsharp
+    (qr_decode_use_sharpen), then zbarDecode the patch. Recovers small/dense QRs.
+  * Corner publishing: scale full->downsized then cv::undistortPoints (or
+    fisheye::undistortPoints) with down_camera_matrix + dist, P=new_camera_matrix,
+    guarded by qr_undistort_corners (default true). down_camera_matrix saved in
+    buildUndistortMaps().
+  * ZBar scanner configured in main() to QR-only.
+
+Build system
+  * CMakeLists.txt: find_package(PkgConfig REQUIRED) + pkg_check_modules(ZBAR
+    REQUIRED zbar); ZBAR include dir added; qr target links ${ZBAR_LIBRARIES}.
+  * package.ros2.xml: <depend>libzbar-dev</depend>.
+  * NEW build prerequisite on the Jetson:  sudo apt install libzbar-dev
+
+Launch (video_source_undistort_qr.ros2.launch)
+  * Added args/params: qr_decode_upscale (2.0), qr_decode_use_clahe (true),
+    qr_decode_use_sharpen (true), qr_undistort_corners (true).
+
+Verification on dev box
+  * Exact ZBar usage syntax-checked against real libzbar-dev 0.23.92 headers (OK).
+  * undistortPoints + ROI-enhancement (resize/CLAHE/GaussianBlur/addWeighted)
+    syntax-checked against OpenCV 4.5.4 (OK).
+  * Full link/build still must be done on the Jetson (jetson-utils absent here).

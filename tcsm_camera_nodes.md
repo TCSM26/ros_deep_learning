@@ -100,10 +100,28 @@ When QR is enabled and a QR is detected, the node publishes (first valid QR):
 | `qr_pose_topic`                        | `/qr/pose`                | `geometry_msgs/PoseStamped`   | camera→QR relative pose |
 | `qr_corners_topic`                     | `/qr/corners_downsized`   | `geometry_msgs/PolygonStamped`| 4 QR corners scaled to the downsized image |
 
-The detector uses `cv::QRCodeDetector::detectAndDecodeMulti` (multi-code) on
-OpenCV >= 4.3, and falls back to single-code `detectAndDecode` on the older
-OpenCV shipped with JetPack. Either way it processes detections in order and
-publishes the **first** one that yields a valid pose.
+### QR detection vs decoding (OpenCV for corners, ZBar for payload)
+
+Detection and decoding are split between two libraries:
+
+- **Detection (corners):** `cv::QRCodeDetector` — `detectMulti` on OpenCV >= 4.3,
+  falling back to single-QR `detect` on the older OpenCV shipped with JetPack.
+  Detection is geometric and does **not** need OpenCV's QUIRC decoder.
+- **Decoding (payload):** **ZBar**. The OpenCV on the Jetson is built *without*
+  the QUIRC backend, so `cv::QRCodeDetector` can find the QR quad but never
+  decodes (it logs `Library QUIRC is not linked. No decoding is performed.`).
+  ZBar is an independent decoder and does the payload reading instead.
+
+Because the two are independent, a QR can produce a valid **pose even when the
+payload can't be decoded** (you'll see `/qr/data` empty / "(undecoded)"). The
+node processes detections in order and publishes the **first** one with a valid
+pose.
+
+**Decode enhancement:** if the whole-frame ZBar pass returns no payload, the node
+retries on an upscaled, contrast-enhanced crop of the detected QR region
+(`qr_decode_upscale`, `qr_decode_use_clahe`, `qr_decode_use_sharpen`). This
+recovers dense/small codes whose modules are too few pixels at native scale. It
+runs only on the QR ROI and only when the cheap whole-frame decode failed.
 
 ### QR relative-pose estimation
 
@@ -127,18 +145,24 @@ publishes the **first** one that yields a valid pose.
 
 ### Full-resolution corners → downsized image coordinates
 
-The detected corners live in full-resolution pixel coordinates. To overlay them
-on the downsized published image (on the PC / visualization side), they are
-scaled:
+The detected corners live in full-resolution **raw (distorted)** pixel
+coordinates, but the published image is **downsized and undistorted**. To overlay
+them correctly the node maps the corners through the *same* transform as the
+published image (`qr_undistort_corners`, default `true`):
 
-```
-scaled_x = full_x * output_width  / full_width
-scaled_y = full_y * output_height / full_height
-```
+1. Scale full-res → downsized (still distorted; the undistort remap's input):
+   ```
+   scaled_x = full_x * output_width  / full_width
+   scaled_y = full_y * output_height / full_height
+   ```
+2. `cv::undistortPoints` with the downsized distortion-model `K` + distortion,
+   reprojected through `new_camera_matrix` (the published image's `K`), giving
+   pixel coords in the undistorted published image.
 
-and published as `PolygonStamped`. Note: the published image is undistorted
-while these corners come from the raw (distorted) full frame, so for strongly
-distorted lenses the overlay is approximate near the image edges.
+The result is published as `PolygonStamped`. With step 2 the overlay lines up
+across the whole frame, including the edges. Set `qr_undistort_corners:=false`
+to publish the plain linearly-scaled (distorted) corners instead — those are
+only approximate near the edges for a distorted lens.
 
 ### Safety checks
 
@@ -147,6 +171,14 @@ detector exceptions, an invalid QR corner count (not a multiple of 4), and
 failed `solvePnP` (that detection is skipped).
 
 ## Build
+
+The QR node decodes payloads with **ZBar**, so install it once on the Jetson:
+
+```bash
+sudo apt install libzbar-dev
+```
+
+Then:
 
 ```bash
 cd /home/roger/Github/TCSM/Jetson_TCSM
@@ -179,6 +211,10 @@ ros2 launch ros_deep_learning video_source_undistort.ros2.launch
 | `qr_enabled_default`        | `false`                 |
 | `calibration_width`         | `420` (calib image W; 0 = use YAML) |
 | `calibration_height`        | `240` (calib image H; 0 = use YAML) |
+| `qr_decode_upscale`         | `2.0` (ROI upscale for decode retry) |
+| `qr_decode_use_clahe`       | `true`                  |
+| `qr_decode_use_sharpen`     | `true`                  |
+| `qr_undistort_corners`      | `true` (map corners through image undistortion) |
 
 All original camera parameters (`input`, `input_width/height`,
 `output_width/height`, `publish_rate`, `calibration_file`, `undistort_alpha`,

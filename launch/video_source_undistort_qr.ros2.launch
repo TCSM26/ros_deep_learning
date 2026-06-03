@@ -53,6 +53,16 @@
   <arg name="calibration_width" default="420"/>
   <arg name="calibration_height" default="240"/>
 
+  <!-- Decode enhancement: retry decoding a detected-but-undecoded QR on an
+       upscaled/contrast-enhanced crop of the QR region. -->
+  <arg name="qr_decode_upscale" default="2.0"/>
+  <arg name="qr_decode_use_clahe" default="true"/>
+  <arg name="qr_decode_use_sharpen" default="true"/>
+
+  <!-- Map published QR corners through the image undistortion (vs linear scale)
+       so the overlay lines up across the whole frame, including the edges. -->
+  <arg name="qr_undistort_corners" default="true"/>
+
   <node
     pkg="ros_deep_learning"
     exec="optimized_camera_node_undistort_qr"
@@ -88,5 +98,9 @@
     <param name="qr_enabled_default" value="$(var qr_enabled_default)"/>
     <param name="calibration_width" value="$(var calibration_width)"/>
     <param name="calibration_height" value="$(var calibration_height)"/>
+    <param name="qr_decode_upscale" value="$(var qr_decode_upscale)"/>
+    <param name="qr_decode_use_clahe" value="$(var qr_decode_use_clahe)"/>
+    <param name="qr_decode_use_sharpen" value="$(var qr_decode_use_sharpen)"/>
+    <param name="qr_undistort_corners" value="$(var qr_undistort_corners)"/>
   </node>
 </launch>

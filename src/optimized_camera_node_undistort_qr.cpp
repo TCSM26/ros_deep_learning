@@ -21,6 +21,7 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <algorithm>
 #include <chrono>
 #include <image_transport/image_transport.hpp>
 #include <sensor_msgs/msg/image.hpp>
@@ -32,6 +33,7 @@
 #include <geometry_msgs/msg/point32.hpp>
 #include "cv_bridge/cv_bridge.h"
 #include <opencv2/opencv.hpp>
+#include <zbar.h>   // payload decoding (this OpenCV build lacks the QUIRC decoder)
 
 // Global variables
 videoSource* stream = NULL;
@@ -79,6 +81,9 @@ int calib_height = 0;
 cv::Mat undistort_map1;             // CV_16SC2 remap LUTs
 cv::Mat undistort_map2;
 cv::Mat new_camera_matrix;          // K for the published, undistorted image
+cv::Mat down_camera_matrix;         // distortion-model K at the downsized size
+                                    // (input space of the undistort remap); used
+                                    // to map QR corners into the published image
 sensor_msgs::msg::CameraInfo cached_camera_info;
 
 // --- QR detection state ---------------------------------------------------
@@ -94,6 +99,19 @@ std::string qr_corners_topic = "/qr/corners_downsized";
 double qr_size_m = 0.10;              // physical QR side length, metres
 int qr_process_every_n_frames = 6;   // run detection on 1 of every N captured frames
 long qr_frame_counter = 0;           // touched only by the capture thread
+
+// Decode-enhancement: when a QR is detected but its payload comes back empty,
+// retry decoding on an upscaled/contrast-enhanced crop of the QR region. The
+// small data modules of a dense QR are often locatable but too few pixels to
+// decode at native resolution; upscaling + CLAHE + unsharp recovers them.
+double qr_decode_upscale = 2.0;      // ROI upscale factor for the decode retry
+bool qr_decode_use_clahe = true;     // apply CLAHE to the ROI before re-decode
+bool qr_decode_use_sharpen = true;   // apply unsharp mask before re-decode
+
+// Map the published QR corners through the same undistortion as the published
+// image (instead of a plain linear scale), so the overlay lines up across the
+// whole frame including the edges. See processQrFrame for the math.
+bool qr_undistort_corners = true;
 
 // Resolution the QR calibration matrix (K) actually corresponds to. The shipped
 // calibration was estimated on the DOWNSIZED image, so its fx/fy/cx/cy are valid
@@ -122,7 +140,8 @@ rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr qr_pose_pub;
 rclcpp::Publisher<geometry_msgs::msg::PolygonStamped>::SharedPtr qr_corners_pub;
 rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr qr_enable_sub;
 
-cv::QRCodeDetector qr_detector;
+cv::QRCodeDetector qr_detector;     // used for corner DETECTION only (no quirc)
+zbar::ImageScanner zbar_scanner;    // used for payload DECODING (configured in main)
 
 // QR worker thread + latest-frame hand-off slot. The capture thread clones the
 // newest full-sized frame into qr_pending_frame and notifies the worker; the
@@ -184,6 +203,7 @@ void buildUndistortMaps(int published_width, int published_height)
     K_scaled.at<double>(1, 1) *= sy;  // fy
     K_scaled.at<double>(0, 2) *= sx;  // cx
     K_scaled.at<double>(1, 2) *= sy;  // cy
+    down_camera_matrix = K_scaled.clone();  // saved for QR corner undistortion
 
     const cv::Size size(published_width, published_height);
     if (calibration_model == "fisheye" || calibration_model == "equidistant") {
@@ -323,6 +343,83 @@ void matrixToQuat(const cv::Matx33d& R, double& qx, double& qy, double& qz, doub
     }
 }
 
+// Decode QR payload(s) in a grayscale image with ZBar. Returns the first QR
+// symbol's data, or "" if none decoded. OpenCV does our DETECTION (corners), but
+// this OpenCV build has no QUIRC backend, so decoding is done here by ZBar.
+std::string zbarDecode(const cv::Mat& gray)
+{
+    if (gray.empty()) {
+        return std::string();
+    }
+    // ZBar needs a continuous, single-channel ("Y800") buffer.
+    const cv::Mat g = gray.isContinuous() ? gray : gray.clone();
+    zbar::Image image(g.cols, g.rows, "Y800", g.data,
+                      static_cast<unsigned long>(g.cols) * g.rows);
+
+    if (zbar_scanner.scan(image) <= 0) {
+        return std::string();
+    }
+    for (auto sym = image.symbol_begin(); sym != image.symbol_end(); ++sym) {
+        if (sym->get_type() == zbar::ZBAR_QRCODE) {
+            return sym->get_data();
+        }
+    }
+    // No QR-typed symbol, but scanning is restricted to QR in main(), so this is
+    // effectively unreachable; return empty for safety.
+    return std::string();
+}
+
+// Decode-enhancement retry. Given the known QR corners (full-res pixels) of a
+// detected-but-undecoded code, crop the QR region from the full-res gray image,
+// upscale it, optionally apply CLAHE + unsharp, and re-run the decoder on the
+// enhanced patch. Returns the decoded payload, or "" if it still cannot decode.
+std::string decodeQrRoi(const cv::Mat& gray, const std::vector<cv::Point2f>& corners)
+{
+    // Nothing to gain if every enhancement is disabled.
+    if (qr_decode_upscale <= 1.0 && !qr_decode_use_clahe && !qr_decode_use_sharpen) {
+        return std::string();
+    }
+
+    // Axis-aligned bounding box of the quad, with a margin, clamped to the image.
+    float min_x = corners[0].x, max_x = corners[0].x;
+    float min_y = corners[0].y, max_y = corners[0].y;
+    for (const auto& c : corners) {
+        min_x = std::min(min_x, c.x);  max_x = std::max(max_x, c.x);
+        min_y = std::min(min_y, c.y);  max_y = std::max(max_y, c.y);
+    }
+    const float w = max_x - min_x;
+    const float h = max_y - min_y;
+    if (w < 4.0f || h < 4.0f) {
+        return std::string();
+    }
+    const int margin = static_cast<int>(0.15f * std::max(w, h)) + 4;
+
+    const int x0 = std::max(0, static_cast<int>(min_x) - margin);
+    const int y0 = std::max(0, static_cast<int>(min_y) - margin);
+    const int x1 = std::min(gray.cols, static_cast<int>(max_x) + margin);
+    const int y1 = std::min(gray.rows, static_cast<int>(max_y) + margin);
+    if (x1 - x0 < 8 || y1 - y0 < 8) {
+        return std::string();
+    }
+
+    cv::Mat enhanced;
+    const cv::Mat roi = gray(cv::Rect(x0, y0, x1 - x0, y1 - y0));
+    const double s = (qr_decode_upscale > 1.0) ? qr_decode_upscale : 1.0;
+    cv::resize(roi, enhanced, cv::Size(), s, s, cv::INTER_CUBIC);
+
+    if (qr_decode_use_clahe) {
+        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
+        clahe->apply(enhanced, enhanced);
+    }
+    if (qr_decode_use_sharpen) {
+        cv::Mat blurred;
+        cv::GaussianBlur(enhanced, blurred, cv::Size(0, 0), 1.0);
+        cv::addWeighted(enhanced, 1.6, blurred, -0.6, 0.0, enhanced);
+    }
+
+    return zbarDecode(enhanced);
+}
+
 // Run QR detection / decoding / pose estimation on one full-sized raw frame and
 // publish the first valid detection. Called only from the QR worker thread.
 void processQrFrame(const cv::Mat& frame, const rclcpp::Time& stamp)
@@ -346,33 +443,34 @@ void processQrFrame(const cv::Mat& frame, const rclcpp::Time& stamp)
         buildQrCameraMatrix(frame.cols, frame.rows);
     }
 
-    // --- QR detection + decoding ---
-    // detectAndDecodeMulti() (multi-QR) only exists on OpenCV >= 4.3. The Jetson
-    // (JetPack) ships an older OpenCV, so fall back to single-QR detectAndDecode
-    // there. Both paths fill `points` (4 corners per code, full-frame pixels) and
-    // `decoded_info` (payload string per code, possibly empty if undecoded).
+    // --- QR corner detection (OpenCV) ---
+    // Only DETECTION is done here (it is geometric and does not need the QUIRC
+    // decoder, which is absent from this OpenCV build). Payload DECODING is done
+    // separately by ZBar below. detectMulti() (multi-QR) needs OpenCV >= 4.3;
+    // older builds fall back to single-QR detect(). `points` holds 4 corners per
+    // code, in full-frame pixels.
     cv::Mat gray;
     cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
 
-    std::vector<std::string> decoded_info;
     std::vector<cv::Point2f> points;
     bool ok = false;
     try {
 #if (CV_VERSION_MAJOR > 4) || (CV_VERSION_MAJOR == 4 && CV_VERSION_MINOR >= 3)
-        ok = qr_detector.detectAndDecodeMulti(gray, decoded_info, points);
+        ok = qr_detector.detectMulti(gray, points);
 #else
         std::vector<cv::Point2f> single_pts;
-        const std::string data = qr_detector.detectAndDecode(gray, single_pts);
-        if (single_pts.size() == 4) {
+        ok = qr_detector.detect(gray, single_pts);
+        if (ok) {
             points = single_pts;
-            decoded_info.push_back(data);  // may be "" if detected but not decoded
-            ok = true;
         }
 #endif
     } catch (const cv::Exception& e) {
-        ROS_ERROR("QR: detect/decode threw: %s", e.what());
+        ROS_ERROR("QR: detect threw: %s", e.what());
         return;
     }
+
+    // Decode all payloads once over the whole frame (cheap, covers all codes).
+    const std::string frame_payload = zbarDecode(gray);
 
     // Safe check: invalid / insufficient corner count (need 4 per QR).
     if (!ok || points.size() < 4 || (points.size() % 4) != 0) {
@@ -433,7 +531,15 @@ void processQrFrame(const cv::Mat& frame, const rclcpp::Time& stamp)
         double qx, qy, qz, qw;
         matrixToQuat(R_link, qx, qy, qz, qw);
 
-        const std::string data = (i < decoded_info.size()) ? decoded_info[i] : std::string();
+        // Payload from the whole-frame ZBar pass; if that came back empty, retry
+        // decoding on an upscaled/contrast-enhanced crop of this QR's region.
+        std::string data = frame_payload;
+        if (data.empty()) {
+            const std::string retry = decodeQrRoi(gray, corners);
+            if (!retry.empty()) {
+                data = retry;
+            }
+        }
 
         // --- Publish decoded text ---
         std_msgs::msg::String data_msg;
@@ -453,16 +559,55 @@ void processQrFrame(const cv::Mat& frame, const rclcpp::Time& stamp)
         pose_msg.pose.orientation.w = qw;
         qr_pose_pub->publish(pose_msg);
 
-        // --- Publish corners scaled to the downsized image proportions ---
-        // scaled_x = full_x * downsized_width / full_width
-        // scaled_y = full_y * downsized_height / full_height
+        // --- Publish corners in the published (downsized, undistorted) image ---
+        // The corners come from the full-size RAW (distorted) frame, but the
+        // published image is downsized AND undistorted, so a plain linear scale
+        // lands them slightly off (worse toward the edges). To make the overlay
+        // line up everywhere, map the corners through the SAME transform as the
+        // published image:
+        //   1) scale full-res -> downsized (still distorted; the remap's input).
+        //      scaled_x = full_x * downsized_width / full_width
+        //      scaled_y = full_y * downsized_height / full_height
+        //   2) undistortPoints with the downsized distortion-model K + dist,
+        //      reprojected through new_camera_matrix (the published image's K),
+        //      giving pixel coords in the undistorted published image.
+        std::vector<cv::Point2f> corners_down(4);
+        for (int k = 0; k < 4; ++k) {
+            corners_down[k].x = static_cast<float>(corners[k].x * scale_x);
+            corners_down[k].y = static_cast<float>(corners[k].y * scale_y);
+        }
+
+        if (qr_undistort_corners &&
+            !down_camera_matrix.empty() && !new_camera_matrix.empty()) {
+            try {
+                std::vector<cv::Point2f> undist;
+                if (calibration_model == "fisheye" ||
+                    calibration_model == "equidistant") {
+                    cv::fisheye::undistortPoints(
+                        corners_down, undist, down_camera_matrix, dist_coeffs,
+                        cv::Mat(), new_camera_matrix);
+                } else {
+                    cv::undistortPoints(
+                        corners_down, undist, down_camera_matrix, dist_coeffs,
+                        cv::Mat(), new_camera_matrix);
+                }
+                if (undist.size() == corners_down.size()) {
+                    corners_down = undist;
+                }
+            } catch (const cv::Exception& e) {
+                // Fall back to the linearly-scaled (distorted) corners.
+                ROS_ERROR("QR: undistortPoints threw: %s, using scaled corners",
+                          e.what());
+            }
+        }
+
         geometry_msgs::msg::PolygonStamped poly_msg;
         poly_msg.header.stamp = stamp;
         poly_msg.header.frame_id = "camera";
-        for (const auto& c : corners) {
+        for (const auto& c : corners_down) {
             geometry_msgs::msg::Point32 p;
-            p.x = static_cast<float>(c.x * scale_x);
-            p.y = static_cast<float>(c.y * scale_y);
+            p.x = c.x;
+            p.y = c.y;
             p.z = 0.0f;
             poly_msg.polygon.points.push_back(p);
         }
@@ -720,6 +865,10 @@ int main(int argc, char **argv)
     // was calibrated on). 0 = fall back to the size stored in the calibration YAML.
     ROS_DECLARE_PARAMETER("calibration_width", calibration_width);
     ROS_DECLARE_PARAMETER("calibration_height", calibration_height);
+    ROS_DECLARE_PARAMETER("qr_decode_upscale", qr_decode_upscale);
+    ROS_DECLARE_PARAMETER("qr_decode_use_clahe", qr_decode_use_clahe);
+    ROS_DECLARE_PARAMETER("qr_decode_use_sharpen", qr_decode_use_sharpen);
+    ROS_DECLARE_PARAMETER("qr_undistort_corners", qr_undistort_corners);
 
     ROS_GET_PARAMETER("resource", resource_str);
     ROS_GET_PARAMETER("codec", codec_str);
@@ -748,6 +897,10 @@ int main(int argc, char **argv)
     ROS_GET_PARAMETER("qr_enabled_default", qr_enabled_default);
     ROS_GET_PARAMETER("calibration_width", calibration_width);
     ROS_GET_PARAMETER("calibration_height", calibration_height);
+    ROS_GET_PARAMETER("qr_decode_upscale", qr_decode_upscale);
+    ROS_GET_PARAMETER("qr_decode_use_clahe", qr_decode_use_clahe);
+    ROS_GET_PARAMETER("qr_decode_use_sharpen", qr_decode_use_sharpen);
+    ROS_GET_PARAMETER("qr_undistort_corners", qr_undistort_corners);
 
     if (resource_str.empty()) {
         ROS_ERROR("resource param wasn't set - please set the node's resource parameter");
@@ -786,6 +939,10 @@ int main(int argc, char **argv)
     }
     ROS_INFO("QR calibration reference resolution: %dx%d (K scaled to full frame for solvePnP)",
              calibration_width, calibration_height);
+
+    // Configure ZBar to scan for QR codes only (faster than all symbologies).
+    zbar_scanner.set_config(zbar::ZBAR_NONE, zbar::ZBAR_CFG_ENABLE, 0);
+    zbar_scanner.set_config(zbar::ZBAR_QRCODE, zbar::ZBAR_CFG_ENABLE, 1);
 
     // Apply default QR enable state from the launch parameter.
     qr_enabled.store(qr_enabled_default);
