@@ -1,0 +1,58 @@
+ros_deep_learning — QR camera node status
+==========================================
+
+Node: optimized_camera_node_undistort_qr (+ launch video_source_undistort_qr.ros2.launch)
+A superset of optimized_camera_node_undistort.cpp that adds local QR detection,
+decoding and relative-pose estimation on the Jetson, without changing the
+original node or launch file. QR runs in a dedicated worker thread on the
+ORIGINAL full-size raw frame (before downsize/undistort); only the downsized
+undistorted image, plus decoded QR info, are published.
+
+Topics:
+  - /image_raw, /image_raw/camera_info  (unchanged, downsized + undistorted)
+  - /qr_enable (sub, std_msgs/Int32; 1=enable, 0=disable, default from param)
+  - /qr/data (std_msgs/String)
+  - /qr/pose (geometry_msgs/PoseStamped, camera->QR, camera_link convention)
+  - /qr/corners_downsized (geometry_msgs/PolygonStamped, corners scaled to the
+    downsized image)
+
+
+UPDATE 1 — scale the calibration matrix for full-size QR pose estimation
+------------------------------------------------------------------------
+Reasoning
+  The shipped camera calibration was estimated on the DOWNSIZED image (e.g.
+  420x240), so its intrinsics fx,fy,cx,cy are only valid at that resolution.
+  QR corners, however, are detected on the FULL-SIZE frame (e.g. 1280x720).
+  solvePnP requires the image points (corners) and the camera intrinsics to be
+  at the SAME resolution; using full-size corners with the downsized matrix
+  yields a wrong pose. So K is scaled up to the full frame before solvePnP, and
+  the downsized matrix is never used for full-size pose estimation.
+
+Code changes
+  - Added params calibration_width / calibration_height (resolution the
+    calibration K corresponds to). 0 => fall back to the size stored in the
+    calibration YAML. Resolved in main() after loadCalibration().
+  - buildQrCameraMatrix(full_w, full_h) now scales FROM calibration_width/height:
+        scale_x = full_width  / calibration_width
+        scale_y = full_height / calibration_height
+        fx_full = fx_calib * scale_x   cx_full = cx_calib * scale_x
+        fy_full = fy_calib * scale_y   cy_full = cy_calib * scale_y
+    Distortion coefficients are kept unchanged (resize, not crop; they are
+    normalized/dimensionless). solvePnP uses this scaled full-resolution matrix.
+  - Added safety comments stating image points and intrinsics must correspond to
+    the same resolution; the calibration safety check now validates
+    calibration_width/height before pose estimation.
+  - video_source_undistort_qr.ros2.launch: added calibration_width (default 420)
+    and calibration_height (default 240) args + param passthrough.
+  - tcsm_camera_nodes.md: added "Why the calibration matrix is scaled" section
+    and the two new params in the launch-parameter table.
+
+Build / run (on the Jetson)
+  cd /home/roger/Github/TCSM/Jetson_TCSM
+  colcon build --packages-select ros_deep_learning
+  source install/setup.bash
+  ros2 launch ros_deep_learning video_source_undistort_qr.ros2.launch
+
+Note: not build-verified on this dev box (jetson-utils/jetson-inference not
+installed here). The added OpenCV/solvePnP logic was syntax-checked against the
+installed OpenCV 4 headers; ROS message/API usage verified against humble headers.

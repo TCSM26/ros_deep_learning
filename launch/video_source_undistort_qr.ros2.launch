@@ -1,0 +1,92 @@
+<launch>
+  <arg name="namespace" default=""/>
+  <arg name="input" default="csi://0"/>
+
+  <!-- Capture size -->
+  <arg name="input_width" default="1280"/>
+  <arg name="input_height" default="720"/>
+  <arg name="input_framerate" default="60.0"/>
+
+  <!-- Published size -->
+  <arg name="output_width" default="420"/>
+  <arg name="output_height" default="240"/>
+
+  <arg name="input_codec" default="unknown"/>
+  <arg name="input_loop" default="0"/>
+  <arg name="input_latency" default="2000"/>
+
+  <!-- Use GPU-side flip if your camera is mounted upside-down -->
+  <arg name="input_flip" default="rotate-180"/>
+
+  <!-- CSI sensor mode. -1 = auto. IMX219: 4 = 1280x720@60fps. -->
+  <arg name="sensor_mode" default="4"/>
+
+  <!-- Stream robustness -->
+  <arg name="pool_size" default="3"/>
+  <arg name="reconnect_delay_ms" default="2000"/>
+  <arg name="max_consecutive_failures" default="5"/>
+
+  <!-- Cap publish rate (Hz). 0 = unlimited. Frames are dropped before resize/convert/undistort. -->
+  <arg name="publish_rate" default="15.0"/>
+
+  <!-- Calibration. The C++ node reads a YAML produced from the .npz by
+       scripts/calibration_npz_to_yaml.py. alpha 0 crops black borders;
+       1 keeps full FoV. -->
+  <arg name="calibration_file" default="$(find-pkg-share ros_deep_learning)/data/calibration_data.yaml"/>
+  <arg name="undistort_alpha" default="0.0"/>
+
+  <!-- QR detection. Runs locally on the Jetson on the full-sized raw frame.
+       Toggle live by publishing 1/0 (std_msgs/Int32) on qr_enable_topic. -->
+  <arg name="qr_enable_topic" default="/qr_enable"/>
+  <arg name="qr_data_topic" default="/qr/data"/>
+  <arg name="qr_pose_topic" default="/qr/pose"/>
+  <arg name="qr_corners_topic" default="/qr/corners_downsized"/>
+  <arg name="qr_size_m" default="0.10"/>
+  <arg name="qr_process_every_n_frames" default="6"/>
+  <arg name="qr_enabled_default" default="false"/>
+
+  <!-- Resolution the camera calibration matrix was estimated on. The shipped
+       calibration was done on the DOWNSIZED image, so K is only valid at this
+       size. The node scales K up to the full-size QR frame before solvePnP.
+       Set these to your output_width/output_height (the calibration image size).
+       0 = fall back to the size recorded in the calibration YAML. -->
+  <arg name="calibration_width" default="420"/>
+  <arg name="calibration_height" default="240"/>
+
+  <node
+    pkg="ros_deep_learning"
+    exec="optimized_camera_node_undistort_qr"
+    name="optimized_camera_node_undistort_qr"
+    output="screen"
+    namespace="$(var namespace)">
+
+    <param name="resource" value="$(var input)"/>
+    <param name="width" value="$(var input_width)"/>
+    <param name="height" value="$(var input_height)"/>
+    <param name="framerate" value="$(var input_framerate)"/>
+    <param name="output_width" value="$(var output_width)"/>
+    <param name="output_height" value="$(var output_height)"/>
+    <param name="codec" value="$(var input_codec)"/>
+    <param name="loop" value="$(var input_loop)"/>
+    <param name="latency" value="$(var input_latency)"/>
+    <param name="flip" value="$(var input_flip)"/>
+    <param name="sensor_mode" value="$(var sensor_mode)"/>
+    <param name="pool_size" value="$(var pool_size)"/>
+    <param name="reconnect_delay_ms" value="$(var reconnect_delay_ms)"/>
+    <param name="max_consecutive_failures" value="$(var max_consecutive_failures)"/>
+    <param name="calibration_file" value="$(var calibration_file)"/>
+    <param name="undistort_alpha" value="$(var undistort_alpha)"/>
+    <param name="publish_rate" value="$(var publish_rate)"/>
+
+    <!-- QR params -->
+    <param name="qr_enable_topic" value="$(var qr_enable_topic)"/>
+    <param name="qr_data_topic" value="$(var qr_data_topic)"/>
+    <param name="qr_pose_topic" value="$(var qr_pose_topic)"/>
+    <param name="qr_corners_topic" value="$(var qr_corners_topic)"/>
+    <param name="qr_size_m" value="$(var qr_size_m)"/>
+    <param name="qr_process_every_n_frames" value="$(var qr_process_every_n_frames)"/>
+    <param name="qr_enabled_default" value="$(var qr_enabled_default)"/>
+    <param name="calibration_width" value="$(var calibration_width)"/>
+    <param name="calibration_height" value="$(var calibration_height)"/>
+  </node>
+</launch>

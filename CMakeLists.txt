@@ -50,6 +50,7 @@ else()
   find_package(rclcpp REQUIRED)
   find_package(std_msgs REQUIRED)
   find_package(sensor_msgs REQUIRED)
+  find_package(geometry_msgs REQUIRED)
   find_package(vision_msgs REQUIRED)
   find_package(image_transport REQUIRED)
   find_package(cv_bridge REQUIRED)
@@ -109,6 +110,10 @@ target_link_libraries(optimized_camera_node2 ${catkin_LIBRARIES} jetson-inferenc
 add_executable(optimized_camera_node_undistort src/optimized_camera_node_undistort.cpp ${common_src})
 target_link_libraries(optimized_camera_node_undistort ${catkin_LIBRARIES} jetson-inference)
 
+# optimized camera node with on-board undistortion + local QR detection/pose
+add_executable(optimized_camera_node_undistort_qr src/optimized_camera_node_undistort_qr.cpp ${common_src})
+target_link_libraries(optimized_camera_node_undistort_qr ${catkin_LIBRARIES} jetson-inference)
+
 
 # ROS2: Dependencias
 ament_target_dependencies(optimized_camera_node
@@ -132,6 +137,18 @@ ament_target_dependencies(optimized_camera_node_undistort
   OpenCV
 )
 install(TARGETS optimized_camera_node_undistort DESTINATION lib/${PROJECT_NAME})
+
+ament_target_dependencies(optimized_camera_node_undistort_qr
+  rclcpp
+  std_msgs
+  sensor_msgs
+  geometry_msgs
+  image_transport
+  vision_msgs
+  cv_bridge
+  OpenCV
+)
+install(TARGETS optimized_camera_node_undistort_qr DESTINATION lib/${PROJECT_NAME})
 
 # ROS2: Dependencias
 ament_target_dependencies(optimized_camera_node2
