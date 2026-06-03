@@ -346,7 +346,11 @@ void processQrFrame(const cv::Mat& frame, const rclcpp::Time& stamp)
         buildQrCameraMatrix(frame.cols, frame.rows);
     }
 
-    // --- QR detection + decoding (OpenCV, multi-code capable) ---
+    // --- QR detection + decoding ---
+    // detectAndDecodeMulti() (multi-QR) only exists on OpenCV >= 4.3. The Jetson
+    // (JetPack) ships an older OpenCV, so fall back to single-QR detectAndDecode
+    // there. Both paths fill `points` (4 corners per code, full-frame pixels) and
+    // `decoded_info` (payload string per code, possibly empty if undecoded).
     cv::Mat gray;
     cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
 
@@ -354,9 +358,19 @@ void processQrFrame(const cv::Mat& frame, const rclcpp::Time& stamp)
     std::vector<cv::Point2f> points;
     bool ok = false;
     try {
+#if (CV_VERSION_MAJOR > 4) || (CV_VERSION_MAJOR == 4 && CV_VERSION_MINOR >= 3)
         ok = qr_detector.detectAndDecodeMulti(gray, decoded_info, points);
+#else
+        std::vector<cv::Point2f> single_pts;
+        const std::string data = qr_detector.detectAndDecode(gray, single_pts);
+        if (single_pts.size() == 4) {
+            points = single_pts;
+            decoded_info.push_back(data);  // may be "" if detected but not decoded
+            ok = true;
+        }
+#endif
     } catch (const cv::Exception& e) {
-        ROS_ERROR("QR: detectAndDecodeMulti threw: %s", e.what());
+        ROS_ERROR("QR: detect/decode threw: %s", e.what());
         return;
     }
 

@@ -100,9 +100,10 @@ When QR is enabled and a QR is detected, the node publishes (first valid QR):
 | `qr_pose_topic`                        | `/qr/pose`                | `geometry_msgs/PoseStamped`   | camera→QR relative pose |
 | `qr_corners_topic`                     | `/qr/corners_downsized`   | `geometry_msgs/PolygonStamped`| 4 QR corners scaled to the downsized image |
 
-The detector is multi-code capable (`cv::QRCodeDetector::detectAndDecodeMulti`);
-it processes detections in order and publishes the **first** one that yields a
-valid pose.
+The detector uses `cv::QRCodeDetector::detectAndDecodeMulti` (multi-code) on
+OpenCV >= 4.3, and falls back to single-code `detectAndDecode` on the older
+OpenCV shipped with JetPack. Either way it processes detections in order and
+publishes the **first** one that yields a valid pose.
 
 ### QR relative-pose estimation
 
