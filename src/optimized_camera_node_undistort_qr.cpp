@@ -96,7 +96,7 @@ std::string qr_data_topic    = "/qr/data";
 std::string qr_pose_topic    = "/qr/pose";
 std::string qr_corners_topic = "/qr/corners_downsized";
 
-double qr_size_m = 0.10;              // physical QR side length, metres
+double qr_size_m = 0.097;              // physical QR side length, metres
 int qr_process_every_n_frames = 6;   // run detection on 1 of every N captured frames
 long qr_frame_counter = 0;           // touched only by the capture thread
 
@@ -112,6 +112,13 @@ bool qr_decode_use_sharpen = true;   // apply unsharp mask before re-decode
 // image (instead of a plain linear scale), so the overlay lines up across the
 // whole frame including the edges. See processQrFrame for the math.
 bool qr_undistort_corners = true;
+
+// Pose-accuracy options. QRCodeDetector corners are coarse, and IPPE returns two
+// planar solutions; sub-pixel refinement + picking the camera-facing, lowest-
+// reprojection solution gives a much steadier QR normal. The lateral accuracy of
+// any downstream "stand in front of the QR" waypoint depends directly on this.
+bool qr_subpix_refine = true;        // cv::cornerSubPix on the detected corners
+double qr_max_reproj_px = 0.0;       // reject pose if reproj error > this (0 = off)
 
 // Resolution the QR calibration matrix (K) actually corresponds to. The shipped
 // calibration was estimated on the DOWNSIZED image, so its fx/fy/cx/cy are valid
@@ -496,10 +503,67 @@ void processQrFrame(const cv::Mat& frame, const rclcpp::Time& stamp)
         std::vector<cv::Point2f> corners(
             points.begin() + i * 4, points.begin() + i * 4 + 4);
 
+        // Sub-pixel corner refinement: QRCodeDetector corners are coarse and the
+        // QR normal is very sensitive to corner error, so refine against the gray
+        // image for a steadier pose.
+        if (qr_subpix_refine) {
+            try {
+                cv::cornerSubPix(
+                    gray, corners, cv::Size(5, 5), cv::Size(-1, -1),
+                    cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::MAX_ITER,
+                                     30, 0.01));
+            } catch (const cv::Exception&) {
+                // keep the coarse corners on failure
+            }
+        }
+
         // --- solvePnP relative-pose estimation ---
         // Raw full-sized image -> full-resolution K and real distortion coeffs.
         cv::Mat rvec, tvec;
         bool pnp_ok = false;
+#if (CV_VERSION_MAJOR >= 4)
+        // IPPE_SQUARE has TWO planar solutions; on near-frontal QRs the one
+        // solvePnP() returns can flip frame-to-frame (flipping the normal). Get
+        // both with solvePnPGeneric and pick the physically valid one (QR facing
+        // the camera) with the lowest reprojection error -> a stable normal.
+        try {
+            std::vector<cv::Mat> rvecs, tvecs;
+            cv::Mat reproj;
+            const int nsol = cv::solvePnPGeneric(
+                object_points, corners, qr_camera_matrix, qr_dist_coeffs,
+                rvecs, tvecs, false,
+                static_cast<cv::SolvePnPMethod>(pnp_flag),
+                cv::noArray(), cv::noArray(), reproj);
+
+            int best = -1;
+            double best_err = 1e18;
+            // Prefer solutions whose QR +Z (face normal) points toward the camera
+            // (z-component < 0 in the optical frame).
+            for (int k = 0; k < nsol; ++k) {
+                cv::Mat Rk;
+                cv::Rodrigues(rvecs[k], Rk);
+                if (Rk.at<double>(2, 2) >= 0.0) continue;
+                const double err = reproj.empty() ? 0.0 : reproj.at<double>(k);
+                if (err < best_err) { best_err = err; best = k; }
+            }
+            // Fallback: none face the camera -> just take the lowest-reproj one.
+            if (best < 0) {
+                for (int k = 0; k < nsol; ++k) {
+                    const double err = reproj.empty() ? 0.0 : reproj.at<double>(k);
+                    if (err < best_err) { best_err = err; best = k; }
+                }
+            }
+            if (best >= 0 &&
+                (qr_max_reproj_px <= 0.0 || best_err <= qr_max_reproj_px)) {
+                rvec = rvecs[best];
+                tvec = tvecs[best];
+                pnp_ok = true;
+            }
+        } catch (const cv::Exception& e) {
+            ROS_ERROR("QR: solvePnPGeneric threw: %s", e.what());
+            pnp_ok = false;
+        }
+#else
         try {
             pnp_ok = cv::solvePnP(object_points, corners,
                                   qr_camera_matrix, qr_dist_coeffs,
@@ -508,6 +572,7 @@ void processQrFrame(const cv::Mat& frame, const rclcpp::Time& stamp)
             ROS_ERROR("QR: solvePnP threw: %s", e.what());
             pnp_ok = false;
         }
+#endif
         // Safe check: skip detections where pose estimation failed.
         if (!pnp_ok) {
             continue;
@@ -869,6 +934,8 @@ int main(int argc, char **argv)
     ROS_DECLARE_PARAMETER("qr_decode_use_clahe", qr_decode_use_clahe);
     ROS_DECLARE_PARAMETER("qr_decode_use_sharpen", qr_decode_use_sharpen);
     ROS_DECLARE_PARAMETER("qr_undistort_corners", qr_undistort_corners);
+    ROS_DECLARE_PARAMETER("qr_subpix_refine", qr_subpix_refine);
+    ROS_DECLARE_PARAMETER("qr_max_reproj_px", qr_max_reproj_px);
 
     ROS_GET_PARAMETER("resource", resource_str);
     ROS_GET_PARAMETER("codec", codec_str);
@@ -901,6 +968,8 @@ int main(int argc, char **argv)
     ROS_GET_PARAMETER("qr_decode_use_clahe", qr_decode_use_clahe);
     ROS_GET_PARAMETER("qr_decode_use_sharpen", qr_decode_use_sharpen);
     ROS_GET_PARAMETER("qr_undistort_corners", qr_undistort_corners);
+    ROS_GET_PARAMETER("qr_subpix_refine", qr_subpix_refine);
+    ROS_GET_PARAMETER("qr_max_reproj_px", qr_max_reproj_px);
 
     if (resource_str.empty()) {
         ROS_ERROR("resource param wasn't set - please set the node's resource parameter");
