@@ -528,33 +528,41 @@ void processQrFrame(const cv::Mat& frame, const rclcpp::Time& stamp)
         // the camera) with the lowest reprojection error -> a stable normal.
         try {
             std::vector<cv::Mat> rvecs, tvecs;
-            cv::Mat reproj;
+            // NB: the built-in reprojectionError output is not requested -- some
+            // OpenCV builds (e.g. 4.2 on JetPack) reject an empty Mat there. We
+            // compute the reprojection error ourselves with projectPoints below.
             const int nsol = cv::solvePnPGeneric(
                 object_points, corners, qr_camera_matrix, qr_dist_coeffs,
                 rvecs, tvecs, false,
-                static_cast<cv::SolvePnPMethod>(pnp_flag),
-                cv::noArray(), cv::noArray(), reproj);
+                static_cast<cv::SolvePnPMethod>(pnp_flag));
 
             int best = -1;
-            double best_err = 1e18;
-            // Prefer solutions whose QR +Z (face normal) points toward the camera
-            // (z-component < 0 in the optical frame).
+            double best_err = 1e18;        // includes a penalty for away-facing
+            double best_reproj = 1e18;     // raw reprojection error of the pick
             for (int k = 0; k < nsol; ++k) {
                 cv::Mat Rk;
                 cv::Rodrigues(rvecs[k], Rk);
-                if (Rk.at<double>(2, 2) >= 0.0) continue;
-                const double err = reproj.empty() ? 0.0 : reproj.at<double>(k);
-                if (err < best_err) { best_err = err; best = k; }
-            }
-            // Fallback: none face the camera -> just take the lowest-reproj one.
-            if (best < 0) {
-                for (int k = 0; k < nsol; ++k) {
-                    const double err = reproj.empty() ? 0.0 : reproj.at<double>(k);
-                    if (err < best_err) { best_err = err; best = k; }
+                // QR +Z (face normal) toward the camera -> z-component < 0.
+                const bool facing = Rk.at<double>(2, 2) < 0.0;
+
+                std::vector<cv::Point2f> proj;
+                cv::projectPoints(object_points, rvecs[k], tvecs[k],
+                                  qr_camera_matrix, qr_dist_coeffs, proj);
+                double reproj = 0.0;
+                for (size_t p = 0; p < proj.size() && p < corners.size(); ++p)
+                    reproj += cv::norm(proj[p] - corners[p]);
+                reproj /= std::max<size_t>(1, proj.size());
+
+                // Prefer camera-facing solutions; among them, lowest reprojection.
+                const double score = reproj + (facing ? 0.0 : 1e6);
+                if (score < best_err) {
+                    best_err = score;
+                    best_reproj = reproj;
+                    best = k;
                 }
             }
             if (best >= 0 &&
-                (qr_max_reproj_px <= 0.0 || best_err <= qr_max_reproj_px)) {
+                (qr_max_reproj_px <= 0.0 || best_reproj <= qr_max_reproj_px)) {
                 rvec = rvecs[best];
                 tvec = tvecs[best];
                 pnp_ok = true;
