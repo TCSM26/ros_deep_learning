@@ -120,6 +120,14 @@ bool qr_undistort_corners = true;
 bool qr_subpix_refine = true;        // cv::cornerSubPix on the detected corners
 double qr_max_reproj_px = 0.0;       // reject pose if reproj error > this (0 = off)
 
+// Plausibility gate on the detected quad: QRCodeDetector::detect occasionally
+// returns a huge, non-square, or self-intersecting quad (background clutter).
+// Reject quads that are non-convex, cover too much of the frame, or are not
+// square enough, BEFORE pose estimation.
+double qr_max_area_ratio = 0.50;     // reject if quad area / image area > this
+double qr_max_aspect_ratio = 2.0;    // reject if longest side / shortest side > this
+double qr_min_side_px = 8.0;         // reject quads smaller than this (noise)
+
 // Resolution the QR calibration matrix (K) actually corresponds to. The shipped
 // calibration was estimated on the DOWNSIZED image, so its fx/fy/cx/cy are valid
 // only at this resolution -- they must NOT be used as-is with full-size QR
@@ -309,6 +317,41 @@ std::vector<cv::Point3f> qrObjectPoints(double size)
         cv::Point3f( h, -h, 0.0f),
         cv::Point3f(-h, -h, 0.0f),
     };
+}
+
+// Plausibility check on a detected 4-corner quad (in full-frame pixels): reject
+// non-convex / self-intersecting quads, quads that cover too much of the frame,
+// and quads that are not square enough. Catches spurious "QR" detections on
+// background clutter before they reach solvePnP.
+bool isPlausibleQrQuad(const std::vector<cv::Point2f>& c, int img_w, int img_h)
+{
+    if (c.size() != 4 || img_w <= 0 || img_h <= 0) {
+        return false;
+    }
+    // Convex + correctly-ordered (a self-intersecting quad is not convex).
+    if (!cv::isContourConvex(c)) {
+        return false;
+    }
+    // Side lengths -> square-ness, and a minimum size.
+    const double s01 = cv::norm(c[1] - c[0]);
+    const double s12 = cv::norm(c[2] - c[1]);
+    const double s23 = cv::norm(c[3] - c[2]);
+    const double s30 = cv::norm(c[0] - c[3]);
+    const double smin = std::min(std::min(s01, s12), std::min(s23, s30));
+    const double smax = std::max(std::max(s01, s12), std::max(s23, s30));
+    if (smin < qr_min_side_px) {
+        return false;
+    }
+    if (qr_max_aspect_ratio > 0.0 && smax / smin > qr_max_aspect_ratio) {
+        return false;
+    }
+    // Area fraction of the frame.
+    const double area = std::abs(cv::contourArea(c));
+    const double img_area = static_cast<double>(img_w) * img_h;
+    if (qr_max_area_ratio > 0.0 && area / img_area > qr_max_area_ratio) {
+        return false;
+    }
+    return true;
 }
 
 // Re-express an OpenCV optical-frame rotation/translation in the ROS
@@ -502,6 +545,12 @@ void processQrFrame(const cv::Mat& frame, const rclcpp::Time& stamp)
     for (size_t i = 0; i < num_codes; ++i) {
         std::vector<cv::Point2f> corners(
             points.begin() + i * 4, points.begin() + i * 4 + 4);
+
+        // Reject implausible quads (huge / non-square / self-intersecting) that
+        // QRCodeDetector sometimes returns on background clutter.
+        if (!isPlausibleQrQuad(corners, gray.cols, gray.rows)) {
+            continue;
+        }
 
         // Sub-pixel corner refinement: QRCodeDetector corners are coarse and the
         // QR normal is very sensitive to corner error, so refine against the gray
@@ -944,6 +993,9 @@ int main(int argc, char **argv)
     ROS_DECLARE_PARAMETER("qr_undistort_corners", qr_undistort_corners);
     ROS_DECLARE_PARAMETER("qr_subpix_refine", qr_subpix_refine);
     ROS_DECLARE_PARAMETER("qr_max_reproj_px", qr_max_reproj_px);
+    ROS_DECLARE_PARAMETER("qr_max_area_ratio", qr_max_area_ratio);
+    ROS_DECLARE_PARAMETER("qr_max_aspect_ratio", qr_max_aspect_ratio);
+    ROS_DECLARE_PARAMETER("qr_min_side_px", qr_min_side_px);
 
     ROS_GET_PARAMETER("resource", resource_str);
     ROS_GET_PARAMETER("codec", codec_str);
@@ -978,6 +1030,9 @@ int main(int argc, char **argv)
     ROS_GET_PARAMETER("qr_undistort_corners", qr_undistort_corners);
     ROS_GET_PARAMETER("qr_subpix_refine", qr_subpix_refine);
     ROS_GET_PARAMETER("qr_max_reproj_px", qr_max_reproj_px);
+    ROS_GET_PARAMETER("qr_max_area_ratio", qr_max_area_ratio);
+    ROS_GET_PARAMETER("qr_max_aspect_ratio", qr_max_aspect_ratio);
+    ROS_GET_PARAMETER("qr_min_side_px", qr_min_side_px);
 
     if (resource_str.empty()) {
         ROS_ERROR("resource param wasn't set - please set the node's resource parameter");
