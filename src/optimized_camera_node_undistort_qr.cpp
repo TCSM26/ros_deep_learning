@@ -128,6 +128,23 @@ double qr_max_area_ratio = 0.50;     // reject if quad area / image area > this
 double qr_max_aspect_ratio = 2.0;    // reject if longest side / shortest side > this
 double qr_min_side_px = 8.0;         // reject quads smaller than this (noise)
 
+// Verticality prior: QRs are pasted upright on boxes, so a valid QR plane is
+// perpendicular to the floor -> its face normal is horizontal. This both
+// disambiguates the two IPPE solutions (prefer the one with a horizontal normal)
+// and rejects poses whose normal tilts more than qr_vertical_tol_deg off
+// horizontal. Needs the camera's downward pitch from horizontal to know which
+// way "up" is in the optical frame.
+bool qr_vertical_filter = false;     // opt-in
+double qr_vertical_tol_deg = 20.0;   // max QR-normal tilt off horizontal
+double qr_cam_pitch_deg = 0.0;       // camera downward pitch from horizontal
+
+// Roll prior: an upright QR also has its bottom edge (the QR's +X axis) parallel
+// to the floor, i.e. horizontal. When enabled, rejects poses whose bottom edge
+// tilts more than qr_roll_tol_deg off horizontal. Uses the same world-up as the
+// verticality filter (qr_cam_pitch_deg).
+bool qr_roll_filter = false;         // opt-in
+double qr_roll_tol_deg = 20.0;       // max bottom-edge tilt off horizontal
+
 // Resolution the QR calibration matrix (K) actually corresponds to. The shipped
 // calibration was estimated on the DOWNSIZED image, so its fx/fy/cx/cy are valid
 // only at this resolution -- they must NOT be used as-is with full-size QR
@@ -585,14 +602,45 @@ void processQrFrame(const cv::Mat& frame, const rclcpp::Time& stamp)
                 rvecs, tvecs, false,
                 static_cast<cv::SolvePnPMethod>(pnp_flag));
 
+            // World-up in the optical frame, from the camera's downward pitch.
+            // A vertical QR (perpendicular to the floor) has a HORIZONTAL face
+            // normal, i.e. one perpendicular to this world-up vector.
+            const double up_p = qr_cam_pitch_deg * CV_PI / 180.0;
+            const cv::Vec3d up_opt(0.0, -std::cos(up_p), -std::sin(up_p));
+            const double vtol_rad = qr_vertical_tol_deg * CV_PI / 180.0;
+            const double rtol_rad = qr_roll_tol_deg * CV_PI / 180.0;
+
             int best = -1;
-            double best_err = 1e18;        // includes a penalty for away-facing
+            double best_err = 1e18;        // includes penalties (facing/vertical/roll)
             double best_reproj = 1e18;     // raw reprojection error of the pick
+            double best_tilt = 0.0;        // chosen normal's tilt off horizontal (rad)
+            double best_roll = 0.0;        // chosen bottom-edge tilt off horizontal (rad)
             for (int k = 0; k < nsol; ++k) {
                 cv::Mat Rk;
                 cv::Rodrigues(rvecs[k], Rk);
+                Rk.convertTo(Rk, CV_64F);
                 // QR +Z (face normal) toward the camera -> z-component < 0.
                 const bool facing = Rk.at<double>(2, 2) < 0.0;
+
+                // QR normal (object +Z) in optical = 3rd column. Tilt off
+                // horizontal = arcsin|normal . up|; 0 = QR perfectly vertical.
+                const cv::Vec3d normal(Rk.at<double>(0, 2),
+                                       Rk.at<double>(1, 2),
+                                       Rk.at<double>(2, 2));
+                double vdot = std::abs(normal.dot(up_opt));
+                vdot = std::min(1.0, std::max(0.0, vdot));
+                const double tilt = std::asin(vdot);
+                const bool vertical_ok = (!qr_vertical_filter) || (tilt <= vtol_rad);
+
+                // QR bottom edge (object +X) in optical = 1st column. An upright
+                // QR has this horizontal -> roll = arcsin|xaxis . up|; 0 = level.
+                const cv::Vec3d xaxis(Rk.at<double>(0, 0),
+                                      Rk.at<double>(1, 0),
+                                      Rk.at<double>(2, 0));
+                double rdot = std::abs(xaxis.dot(up_opt));
+                rdot = std::min(1.0, std::max(0.0, rdot));
+                const double roll = std::asin(rdot);
+                const bool roll_ok = (!qr_roll_filter) || (roll <= rtol_rad);
 
                 std::vector<cv::Point2f> proj;
                 cv::projectPoints(object_points, rvecs[k], tvecs[k],
@@ -602,14 +650,33 @@ void processQrFrame(const cv::Mat& frame, const rclcpp::Time& stamp)
                     reproj += cv::norm(proj[p] - corners[p]);
                 reproj /= std::max<size_t>(1, proj.size());
 
-                // Prefer camera-facing solutions; among them, lowest reprojection.
-                const double score = reproj + (facing ? 0.0 : 1e6);
+                // Prefer camera-facing AND (when enabled) vertical + level
+                // solutions; among the preferred, the lowest reprojection error.
+                const double score = reproj + (facing ? 0.0 : 1e6)
+                                            + (vertical_ok ? 0.0 : 1e6)
+                                            + (roll_ok ? 0.0 : 1e6);
                 if (score < best_err) {
                     best_err = score;
                     best_reproj = reproj;
+                    best_tilt = tilt;
+                    best_roll = roll;
                     best = k;
                 }
             }
+
+            // Reject the QR if the best solution is not vertical (normal tilted)
+            // or rolled (bottom edge tilted) beyond the tolerances.
+            if (best >= 0 && qr_vertical_filter && best_tilt > vtol_rad) {
+                ROS_DEBUG("QR: rejected non-vertical pose (normal tilt %.1f deg > %.1f deg)",
+                          best_tilt * 180.0 / CV_PI, qr_vertical_tol_deg);
+                best = -1;
+            }
+            if (best >= 0 && qr_roll_filter && best_roll > rtol_rad) {
+                ROS_DEBUG("QR: rejected rolled pose (bottom-edge tilt %.1f deg > %.1f deg)",
+                          best_roll * 180.0 / CV_PI, qr_roll_tol_deg);
+                best = -1;
+            }
+
             if (best >= 0 &&
                 (qr_max_reproj_px <= 0.0 || best_reproj <= qr_max_reproj_px)) {
                 rvec = rvecs[best];
@@ -996,6 +1063,11 @@ int main(int argc, char **argv)
     ROS_DECLARE_PARAMETER("qr_max_area_ratio", qr_max_area_ratio);
     ROS_DECLARE_PARAMETER("qr_max_aspect_ratio", qr_max_aspect_ratio);
     ROS_DECLARE_PARAMETER("qr_min_side_px", qr_min_side_px);
+    ROS_DECLARE_PARAMETER("qr_vertical_filter", qr_vertical_filter);
+    ROS_DECLARE_PARAMETER("qr_vertical_tol_deg", qr_vertical_tol_deg);
+    ROS_DECLARE_PARAMETER("qr_cam_pitch_deg", qr_cam_pitch_deg);
+    ROS_DECLARE_PARAMETER("qr_roll_filter", qr_roll_filter);
+    ROS_DECLARE_PARAMETER("qr_roll_tol_deg", qr_roll_tol_deg);
 
     ROS_GET_PARAMETER("resource", resource_str);
     ROS_GET_PARAMETER("codec", codec_str);
@@ -1033,6 +1105,11 @@ int main(int argc, char **argv)
     ROS_GET_PARAMETER("qr_max_area_ratio", qr_max_area_ratio);
     ROS_GET_PARAMETER("qr_max_aspect_ratio", qr_max_aspect_ratio);
     ROS_GET_PARAMETER("qr_min_side_px", qr_min_side_px);
+    ROS_GET_PARAMETER("qr_vertical_filter", qr_vertical_filter);
+    ROS_GET_PARAMETER("qr_vertical_tol_deg", qr_vertical_tol_deg);
+    ROS_GET_PARAMETER("qr_cam_pitch_deg", qr_cam_pitch_deg);
+    ROS_GET_PARAMETER("qr_roll_filter", qr_roll_filter);
+    ROS_GET_PARAMETER("qr_roll_tol_deg", qr_roll_tol_deg);
 
     if (resource_str.empty()) {
         ROS_ERROR("resource param wasn't set - please set the node's resource parameter");

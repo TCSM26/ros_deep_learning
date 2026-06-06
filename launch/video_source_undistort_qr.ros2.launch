@@ -63,6 +63,21 @@
        so the overlay lines up across the whole frame, including the edges. -->
   <arg name="qr_undistort_corners" default="true"/>
 
+  <!-- Verticality prior: QRs are upright on boxes, so a valid QR plane is
+       perpendicular to the floor (normal horizontal). When enabled, this picks
+       the IPPE solution with a horizontal normal and rejects poses tilted more
+       than qr_vertical_tol_deg. qr_cam_pitch_deg = camera downward pitch from
+       horizontal (0 = level). -->
+  <arg name="qr_vertical_filter" default="false"/>
+  <arg name="qr_vertical_tol_deg" default="20.0"/>
+  <arg name="qr_cam_pitch_deg" default="0.0"/>
+
+  <!-- Roll prior: an upright QR's bottom edge is parallel to the floor. When
+       enabled, rejects poses whose bottom edge tilts more than qr_roll_tol_deg
+       off horizontal. Uses the same world-up (qr_cam_pitch_deg). -->
+  <arg name="qr_roll_filter" default="false"/>
+  <arg name="qr_roll_tol_deg" default="20.0"/>
+
   <node
     pkg="ros_deep_learning"
     exec="optimized_camera_node_undistort_qr"
@@ -102,5 +117,10 @@
     <param name="qr_decode_use_clahe" value="$(var qr_decode_use_clahe)"/>
     <param name="qr_decode_use_sharpen" value="$(var qr_decode_use_sharpen)"/>
     <param name="qr_undistort_corners" value="$(var qr_undistort_corners)"/>
+    <param name="qr_vertical_filter" value="$(var qr_vertical_filter)"/>
+    <param name="qr_vertical_tol_deg" value="$(var qr_vertical_tol_deg)"/>
+    <param name="qr_cam_pitch_deg" value="$(var qr_cam_pitch_deg)"/>
+    <param name="qr_roll_filter" value="$(var qr_roll_filter)"/>
+    <param name="qr_roll_tol_deg" value="$(var qr_roll_tol_deg)"/>
   </node>
 </launch>

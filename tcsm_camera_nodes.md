@@ -143,6 +143,30 @@ runs only on the QR ROI and only when the cheap whole-frame decode failed.
   `transforms.optical_to_link`. The result is published as `PoseStamped` in the
   `camera` frame.
 
+### Verticality prior (`qr_vertical_filter`)
+
+`SOLVEPNP_IPPE_SQUARE` returns **two** planar solutions; the node already prefers
+the camera-facing one with the lowest reprojection error. Because the QRs are
+pasted upright on boxes, a valid QR plane is **perpendicular to the floor**, so
+its face normal is **horizontal**. Enabling `qr_vertical_filter`:
+
+- among the IPPE solutions, prefers the one whose normal is horizontal (this
+  resolves the flip ambiguity using the prior), and
+- **rejects** the QR entirely if even the best solution's normal tilts more than
+  `qr_vertical_tol_deg` (default `20°`) off horizontal.
+
+"Horizontal" is defined relative to world-up in the optical frame, derived from
+`qr_cam_pitch_deg` (the camera's downward pitch from horizontal; `0` = level).
+The filter is **off by default**; enable it (and set `qr_cam_pitch_deg` to match
+your mount) when the QRs are known to be upright. It rejects the typical
+flipped/noisy poses whose normal points up or down.
+
+A complementary `qr_roll_filter` constrains the **roll**: an upright QR's bottom
+edge (the QR's `+X` axis) is parallel to the floor, i.e. horizontal. When
+enabled, it rejects poses whose bottom edge tilts more than `qr_roll_tol_deg`
+(default `20°`) off horizontal (same world-up as the verticality filter). Use
+both together to pin the QR fully upright: vertical plane **and** level edges.
+
 ### Full-resolution corners → downsized image coordinates
 
 The detected corners live in full-resolution **raw (distorted)** pixel
@@ -215,6 +239,11 @@ ros2 launch ros_deep_learning video_source_undistort.ros2.launch
 | `qr_decode_use_clahe`       | `true`                  |
 | `qr_decode_use_sharpen`     | `true`                  |
 | `qr_undistort_corners`      | `true` (map corners through image undistortion) |
+| `qr_vertical_filter`        | `false` (reject/​disambiguate by QR verticality) |
+| `qr_vertical_tol_deg`       | `20.0` (max QR-normal tilt off horizontal) |
+| `qr_cam_pitch_deg`          | `0.0` (camera downward pitch; defines world-up) |
+| `qr_roll_filter`            | `false` (reject QRs whose bottom edge is not level) |
+| `qr_roll_tol_deg`           | `20.0` (max bottom-edge tilt off horizontal) |
 
 All original camera parameters (`input`, `input_width/height`,
 `output_width/height`, `publish_rate`, `calibration_file`, `undistort_alpha`,
